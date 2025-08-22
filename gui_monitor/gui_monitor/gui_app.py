@@ -1,16 +1,91 @@
 #!/usr/bin/env python3
+
+from geometry_msgs.msg import TwistStamped
+
 import sys
 from typing import List, Tuple
+import signal
 
 import rclpy
 from rclpy.node import Node
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QPointF, Signal, QSize
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QListWidget, QLabel, QPushButton, QGroupBox, QSizePolicy, QFrame
 )
+from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen
 
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+import cv2
+
+
+class VirtualJoystick(QWidget):
+    moved = Signal(float, float)  # dx, dy
+    released = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.setMinimumSize(160, 160)
+        self.setMaximumSize(200, 200)
+        self.setMouseTracking(True)
+        self.center = QPointF(self.width() / 2, self.height() / 2)
+        self.knob_pos = self.center
+        self.pressed = False
+
+    def resizeEvent(self, event):
+        self.center = QPointF(self.width() / 2, self.height() / 2)
+        if not self.pressed:
+            self.knob_pos = self.center
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Background circle
+        radius = min(self.width(), self.height()) / 2 - 5
+        painter.setPen(QPen(QColor("#888"), 4))
+        painter.setBrush(QColor("#ccc"))
+        painter.drawEllipse(self.center, radius, radius)
+
+        # Knob
+        knob_radius = 20
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#4CAF50"))
+        painter.drawEllipse(self.knob_pos, knob_radius, knob_radius)
+
+    def mousePressEvent(self, event):
+        self.pressed = True
+        self._update_knob(event.pos())
+
+    def mouseMoveEvent(self, event):
+        if self.pressed:
+            self._update_knob(event.pos())
+
+    def mouseReleaseEvent(self, event):
+        self.pressed = False
+        self.knob_pos = self.center
+        self.released.emit()
+        self.update()
+
+    def _update_knob(self, pos):
+        dx = pos.x() - self.center.x()
+        dy = pos.y() - self.center.y()
+        radius = min(self.width(), self.height()) / 2 - 20
+
+        dist = (dx**2 + dy**2)**0.5
+        if dist > radius:
+            scale = radius / dist
+            dx *= scale
+            dy *= scale
+
+        self.knob_pos = QPointF(self.center.x() + dx, self.center.y() + dy)
+        self.update()
+
+        norm_dx = dx / radius
+        norm_dy = -dy / radius  # invertir eje Y
+        self.moved.emit(norm_dx, norm_dy)
 
 class RosUINode(Node):
     """Nodo ROS para consultas ligeras desde la UI."""
@@ -25,6 +100,12 @@ class MainWindow(QMainWindow):
     def __init__(self, node: RosUINode):
         super().__init__()
         self.node = node
+        self.cmd_vel_pub = self.node.create_publisher(TwistStamped, "/cmd_vel", 10)
+        self.current_dx = 0.0
+        self.current_dy = 0.0
+        self.cmd_timer = QTimer()
+        self.cmd_timer.timeout.connect(self.publish_cmd_vel)
+        self.cmd_timer.start(100)  # publica cada 100ms
         self.setWindowTitle("Panel de Control del Robot")
         self.resize(1280, 800)
 
@@ -32,19 +113,9 @@ class MainWindow(QMainWindow):
 
         # ─────────────── Lista de tópicos ───────────────
         topics_box = QGroupBox("Tópicos (auto)")
-        topics_box.setStyleSheet("QGroupBox { font-weight:bold; font-size:14px; color:#333; }")
         topics_v = QVBoxLayout()
         self.topic_list = QListWidget()
-        self.topic_list.setStyleSheet("""
-            QListWidget {
-                background-color: #f0f0f0; border: 1px solid #ccc; padding:5px;
-            }
-            QListWidget::item:selected {
-                background-color: #4CAF50; color: white;
-            }
-        """)
         self.topic_status = QLabel("—")
-        self.topic_status.setStyleSheet("color: gray;")
         topics_v.addWidget(self.topic_list, 1)
         topics_v.addWidget(self.topic_status)
         topics_box.setLayout(topics_v)
@@ -53,39 +124,31 @@ class MainWindow(QMainWindow):
 
         # ─────────────── Controles del robot ───────────────
         controls_box = QGroupBox("Controles del robot")
-        controls_box.setStyleSheet("QGroupBox { font-weight:bold; font-size:14px; color:#333; }")
         controls_v = QVBoxLayout()
 
-        # Joystick estilo diamond
-        joystick_box = QGroupBox("Joystick")
-        joystick_box.setStyleSheet("QGroupBox { font-weight:bold; font-size:13px; color:#555; }")
-        joystick_layout = QGridLayout()
+        # Joystick virtual
+        self.joystick = VirtualJoystick()
+        self.joystick.moved.connect(self.handle_joystick_move)
+        self.joystick.released.connect(self.handle_joystick_release)
+        controls_v.addWidget(self.joystick, alignment=Qt.AlignCenter)
 
-        self.btn_up = QPushButton("↑")
-        self.btn_down = QPushButton("↓")
-        self.btn_left = QPushButton("←")
-        self.btn_right = QPushButton("→")
-        self.btn_stop = QPushButton("⏹")
+        self.linear_vel_label = QLabel("Velocidad Lineal: 0.00 m/s")
+        self.angular_vel_label = QLabel("Velocidad Angular: 0.00 rad/s")
+        self.linear_vel_label.setStyleSheet("font-size: 14px; color: #222;")
+        self.angular_vel_label.setStyleSheet("font-size: 14px; color: #222;")
+        controls_v.addWidget(self.linear_vel_label)
+        controls_v.addWidget(self.angular_vel_label)
 
-        for b in (self.btn_up, self.btn_down, self.btn_left, self.btn_right, self.btn_stop):
-            b.setStyleSheet("""
-                QPushButton {
-                    background-color: #4CAF50; color: white; font-size: 18px;
-                    border-radius: 30px; padding: 10px;
-                }
-                QPushButton:hover { background-color: #45a049; }
-                QPushButton:pressed { background-color: #388E3C; }
-            """)
-            b.setFixedSize(60, 60)
+        # Placeholder para telemetría
+        placeholder_controls = QLabel("Telemetría / Estado / Diagnósticos…")
+        placeholder_controls.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
+        placeholder_controls.setAlignment(Qt.AlignCenter)
+        placeholder_controls.setStyleSheet("background:#222; color:#eee; font-size:14px;")
+        placeholder_controls.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        controls_v.addWidget(placeholder_controls, 1)
 
-        joystick_layout.addWidget(self.btn_up, 0, 1)
-        joystick_layout.addWidget(self.btn_left, 1, 0)
-        joystick_layout.addWidget(self.btn_stop, 1, 1)
-        joystick_layout.addWidget(self.btn_right, 1, 2)
-        joystick_layout.addWidget(self.btn_down, 2, 1)
-
-        joystick_box.setLayout(joystick_layout)
-        controls_v.addWidget(joystick_box)
+        controls_box.setLayout(controls_v)
+        root.addWidget(controls_box, 1)
 
         # Placeholder para telemetría y estado
         placeholder_controls = QLabel("Telemetría / Estado / Diagnósticos…")
@@ -100,13 +163,13 @@ class MainWindow(QMainWindow):
 
         # ─────────────── Cámaras ───────────────
         cameras_box = QGroupBox("Cámaras")
-        cameras_box.setStyleSheet("QGroupBox { font-weight:bold; font-size:14px; color:#333; }")
         grid = QGridLayout()
         self.cam_labels = []
         for i in range(4):
             lbl = QLabel(f"Cam {i+1}\n(pendiente)")
             lbl.setAlignment(Qt.AlignCenter)
-            lbl.setMinimumSize(320, 240)
+            lbl.setMinimumSize(400, 250)
+            lbl.setMaximumHeight(300)
             lbl.setFrameStyle(QFrame.Panel | QFrame.Raised)
             lbl.setStyleSheet("""
                 background:#111; color:#bbb;
@@ -118,7 +181,6 @@ class MainWindow(QMainWindow):
         cameras_box.setLayout(grid)
         root.addWidget(cameras_box, 1)
 
-        # Contenedor central
         container = QWidget()
         container.setLayout(root)
         self.setCentralWidget(container)
@@ -155,6 +217,33 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.topic_status.setText(f"Error listando tópicos: {e}")
 
+    def publish_cmd_vel(self):
+        msg = TwistStamped()
+        msg.twist.linear.x = self.current_dy * 0.2     # escala máxima: 0.2 m/s
+        msg.twist.angular.z = self.current_dx * 1.0    # escala máxima: 1.0 rad/s
+        self.cmd_vel_pub.publish(msg)
+
+    def publish_cmd_vel(self):
+        
+        msg = TwistStamped()
+        msg.header.stamp = self.node.get_clock().now().to_msg()
+        msg.twist.linear.x = self.current_dy * 0.5
+        msg.twist.angular.z = self.current_dx * 1.0
+        self.cmd_vel_pub.publish(msg)
+
+        # Actualizar labels con valores en vivo
+        self.linear_vel_label.setText(f"Velocidad Lineal: {msg.twist.linear.x:.2f} m/s")
+        self.angular_vel_label.setText(f"Velocidad Angular: {msg.twist.angular.z:.2f} rad/s")
+
+
+    def handle_joystick_move(self, dx: float, dy: float):
+        self.current_dx = dx
+        self.current_dy = dy
+
+    def handle_joystick_release(self):
+        self.current_dx = 0.0
+        self.current_dy = 0.0
+
     def closeEvent(self, event):
         try:
             self.refresh_timer.stop()
@@ -164,6 +253,43 @@ class MainWindow(QMainWindow):
         finally:
             super().closeEvent(event)
 
+class ImageSubscriber(Node):
+    def __init__(self, label: QLabel, topic="/camera/image_raw"):
+        super().__init__('image_viewer')
+        self.label = label
+        self.bridge = CvBridge()
+        self.subscription = self.create_subscription(
+            Image,
+            topic,
+            self.listener_callback,
+            10
+        )
+
+    def listener_callback(self, msg: Image):
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except Exception as e:
+            print(f"[ERROR] cv_bridge: {e}")
+            return
+
+        # Convertir a QImage
+        h, w, ch = cv_image.shape
+        bytes_per_line = ch * w
+        qt_image = QImage(cv_image.data, w, h, bytes_per_line, QImage.Format_BGR888)
+        pixmap = QPixmap.fromImage(qt_image)
+
+        # Mostrar en la GUI
+        self.label.setPixmap(pixmap.scaled(
+            self.label.width(),
+            self.label.height(),
+            Qt.KeepAspectRatioByExpanding
+        ))
+
+
+def handle_sigint(*args):
+    print("Ctrl+C detectado, cerrando GUI...")
+    QApplication.quit()  # Esto cierra la app Qt limpia
+
 
 def main():
     rclpy.init()
@@ -171,6 +297,34 @@ def main():
     app = QApplication(sys.argv)
     win = MainWindow(node)
     win.show()
+
+    # Lista de tópicos de cámara
+    cam_topics = [
+        "/camera/image_raw",
+        # "/camera2/image_raw",
+        # "/camera3/image_raw",
+        # "/camera4/image_raw"
+    ]
+
+    # Lista de nodos de cámara
+    cam_nodes = []
+    for i, topic in enumerate(cam_topics):
+        if i < len(win.cam_labels):
+            cam_node = ImageSubscriber(win.cam_labels[i], topic)
+            cam_nodes.append(cam_node)
+
+    # QTimer para ejecutar spin_once en cada nodo de cámara
+    def spin_all():
+        for n in cam_nodes:
+            rclpy.spin_once(n, timeout_sec=0.01)
+
+    spin_timer = QTimer()
+    spin_timer.timeout.connect(spin_all)
+    spin_timer.start(10)
+
+
+    signal.signal(signal.SIGINT, handle_sigint)
+
     sys.exit(app.exec())
 
 
