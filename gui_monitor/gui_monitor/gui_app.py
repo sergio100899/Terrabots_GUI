@@ -50,10 +50,22 @@ class VirtualJoystick(QWidget):
         painter.drawEllipse(self.center, radius, radius)
 
         # Knob
+        # knob_radius = 20
+        # painter.setPen(Qt.NoPen)
+        # painter.setBrush(QColor("#4CAF50"))
+        # painter.drawEllipse(self.knob_pos, knob_radius, knob_radius)
+
         knob_radius = 20
+        dx = self.knob_pos.x() - self.center.x()
+        dy = self.knob_pos.y() - self.center.y()
+        intensity = min(1.0, (dx**2 + dy**2)**0.5 / (self.width() / 2 - 20))
+
+        color = QColor.fromHsvF(0.33 * (1 - intensity), 1.0, 1.0)  # verde → rojo
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#4CAF50"))
+        painter.setBrush(color)
         painter.drawEllipse(self.knob_pos, knob_radius, knob_radius)
+
+        painter.end()
 
     def mousePressEvent(self, event):
         self.pressed = True
@@ -217,17 +229,17 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.topic_status.setText(f"Error listando tópicos: {e}")
 
-    def publish_cmd_vel(self):
-        msg = TwistStamped()
-        msg.twist.linear.x = self.current_dy * 0.2     # escala máxima: 0.2 m/s
-        msg.twist.angular.z = self.current_dx * 1.0    # escala máxima: 1.0 rad/s
-        self.cmd_vel_pub.publish(msg)
+    # def publish_cmd_vel(self):
+    #     msg = TwistStamped()
+    #     msg.twist.linear.x = self.current_dy * 0.2     # escala máxima: 0.2 m/s
+    #     msg.twist.angular.z = self.current_dx * 1.0    # escala máxima: 1.0 rad/s
+    #     self.cmd_vel_pub.publish(msg)
 
     def publish_cmd_vel(self):
         
         msg = TwistStamped()
         msg.header.stamp = self.node.get_clock().now().to_msg()
-        msg.twist.linear.x = self.current_dy * 0.5
+        msg.twist.linear.x = self.current_dy * 0.2
         msg.twist.angular.z = self.current_dx * 1.0
         self.cmd_vel_pub.publish(msg)
 
@@ -297,6 +309,55 @@ def main():
     app = QApplication(sys.argv)
     win = MainWindow(node)
     win.show()
+
+    app.setStyleSheet("""
+        QMainWindow {
+            background-color: #1e1e1e;
+        }
+
+        QGroupBox {
+            border: 1px solid #444;
+            border-radius: 5px;
+            margin-top: 12px;
+            font-weight: bold;
+            color: #f0f0f0;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            subcontrol-position: top center;
+            padding: 4px;
+        }
+
+        QLabel {
+            color: #ccc;
+            font-size: 14px;
+        }
+
+        QListWidget {
+            background-color: #2c2c2c;
+            color: #eee;
+            border: 1px solid #555;
+            font-size: 13px;
+            padding: 4px;
+        }
+
+        QPushButton {
+            background-color: #3c3c3c;
+            color: #eee;
+            border: 1px solid #666;
+            border-radius: 5px;
+            padding: 6px 10px;
+            font-weight: bold;
+        }
+        QPushButton:hover {
+            background-color: #555;
+        }
+
+        QFrame {
+            background-color: #222;
+            color: #ddd;
+        }
+    """)
 
     # Lista de tópicos de cámara
     cam_topics = [
