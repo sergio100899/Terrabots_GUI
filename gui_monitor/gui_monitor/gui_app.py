@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from geometry_msgs.msg import TwistStamped
+from nav_msgs.msg import Odometry
 
 import sys
 from typing import List, Tuple
@@ -30,14 +31,38 @@ import io
 import requests
 import json
 
+
+class OdometrySubscriber(Node):
+    def __init__(self):
+        super().__init__('odometry_subscriber')
+        self.subscription = self.create_subscription(
+            Odometry,
+            '/odom',
+            self.listener_callback,
+            10)
+        self.subscription  # evitar warning unused
+        self.position = None
+        self.timestamp = None
+
+    def listener_callback(self, msg: Odometry):
+        # Guardamos la posición y el timestamp cada vez que llega un mensaje
+        self.position = (
+            msg.pose.pose.position.x,
+            msg.pose.pose.position.y,
+            msg.pose.pose.position.z
+        )
+        self.timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+
 class UploadWorker(QObject):
-    finished = Signal(str)   # para notificar al GUI el path del reporte
+    finished = Signal(str)
     error = Signal(str)
 
-    def __init__(self, img_bytes: bytes, cam_id: int):
+    def __init__(self, img_bytes: bytes, cam_id: int, position=None, timestamp=None):  ### NUEVO
         super().__init__()
         self.img_bytes = img_bytes
         self.cam_id = cam_id
+        self.position = position
+        self.timestamp = timestamp
 
     def run(self):
         try:
@@ -45,13 +70,16 @@ class UploadWorker(QObject):
                 "image": (f"cam{self.cam_id+1}.png", self.img_bytes, "image/png")
             }
             metadata = {
-                "position": {"x": -12.0464, "y": -77.0428, "z": 123.0},
-                "timestamp": 1724298858
+                "position": {
+                    "x": self.position[0] if self.position else 0.0,
+                    "y": self.position[1] if self.position else 0.0,
+                    "z": self.position[2] if self.position else 0.0
+                },
+                "timestamp": int(self.timestamp) if self.timestamp else 0
             }
+            data = {"metadata_json": json.dumps(metadata)}
 
-            data = {
-                "metadata_json": json.dumps(metadata)
-            }
+            print(data)
 
             response = requests.post(
                 "http://localhost:8000/add_landmark/",
@@ -60,10 +88,6 @@ class UploadWorker(QObject):
                 timeout=60
             )
             if response.status_code == 201:
-                # out_filename = f"reporte_cam{self.cam_id+1}.docx"
-                # with open(out_filename, "wb") as f:
-                #     f.write(response.content)
-                # self.finished.emit(out_filename)
                 print("Response ok")
             else:
                 self.error.emit(f"Error {response.status_code}: {response.text}")
@@ -158,9 +182,10 @@ class RosUINode(Node):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, node: RosUINode):
+    def __init__(self, node: RosUINode, odom_node: OdometrySubscriber):
         super().__init__()
         self.node = node
+        self.odom_node = odom_node
         self.cmd_vel_pub = self.node.create_publisher(TwistStamped, "/cmd_vel", 10)
         self.current_dx = 0.0
         self.current_dy = 0.0
@@ -193,12 +218,37 @@ class MainWindow(QMainWindow):
         self.joystick.released.connect(self.handle_joystick_release)
         controls_v.addWidget(self.joystick, alignment=Qt.AlignCenter)
 
-        self.linear_vel_label = QLabel("Velocidad Lineal: 0.00 m/s")
-        self.angular_vel_label = QLabel("Velocidad Angular: 0.00 rad/s")
-        self.linear_vel_label.setStyleSheet("font-size: 14px; color: #222;")
-        self.angular_vel_label.setStyleSheet("font-size: 14px; color: #222;")
-        controls_v.addWidget(self.linear_vel_label)
-        controls_v.addWidget(self.angular_vel_label)
+        # ─────────────── Bloque: Velocidades en vivo ───────────────
+        vel_box = QGroupBox("Velocidades (cmd_vel)")
+        vel_layout = QVBoxLayout()
+
+        self.linear_vel_label = QLabel("Lineal: 0.00 m/s")
+        self.angular_vel_label = QLabel("Angular: 0.00 rad/s")
+        for lbl in [self.linear_vel_label, self.angular_vel_label]:
+            lbl.setStyleSheet("font-size: 14px; color: #0f0; background:#222; padding:4px;")
+
+        vel_layout.addWidget(self.linear_vel_label)
+        vel_layout.addWidget(self.angular_vel_label)
+        vel_box.setLayout(vel_layout)
+
+        controls_v.addWidget(vel_box)
+
+        # ─────────────── Bloque: Odometría ───────────────
+        odom_box = QGroupBox("Odometría")
+        odom_layout = QVBoxLayout()
+
+        self.odom_pos_label = QLabel("Posición: x=0.00, y=0.00, z=0.00")
+        self.odom_time_label = QLabel("Timestamp: 0.00")
+
+        for lbl in [self.odom_pos_label, self.odom_time_label]:
+            lbl.setStyleSheet("font-size: 14px; color: #0af; background:#222; padding:4px;")
+
+        odom_layout.addWidget(self.odom_pos_label)
+        odom_layout.addWidget(self.odom_time_label)
+        odom_box.setLayout(odom_layout)
+
+        controls_v.addWidget(odom_box)
+
 
         # Placeholder para telemetría
         placeholder_controls = QLabel("Telemetría / Estado / Diagnósticos…")
@@ -227,9 +277,18 @@ class MainWindow(QMainWindow):
         grid = QGridLayout()
         self.cam_labels = []
         self.screenshot_buttons = []
-        for i in range(4):
+
+        camera_names = ["Frontal", "Trasera", "Izquierda", "Derecha"]
+
+        for i, cam_name in enumerate(camera_names):
             vbox = QVBoxLayout()
             
+            # Título encima de la cámara
+            title = QLabel(f"Cámara {cam_name}")
+            title.setAlignment(Qt.AlignCenter)
+            title.setStyleSheet("font-weight: bold; color: #fff;")
+            vbox.addWidget(title)
+
             # QLabel de cámara
             lbl = QLabel(f"Cam {i+1}\n(pendiente)")
             lbl.setAlignment(Qt.AlignCenter)
@@ -287,7 +346,7 @@ class MainWindow(QMainWindow):
 
         # Crear worker + hilo
         self.thread = QThread()
-        self.worker = UploadWorker(img_bytes, cam_id)
+        self.worker = UploadWorker(img_bytes, cam_id, position=self.odom_node.position, timestamp=self.odom_node.timestamp)
         self.worker.moveToThread(self.thread)
 
         self.thread.started.connect(self.worker.run)
@@ -345,6 +404,14 @@ class MainWindow(QMainWindow):
         # Actualizar labels con valores en vivo
         self.linear_vel_label.setText(f"Velocidad Lineal: {msg.twist.linear.x:.2f} m/s")
         self.angular_vel_label.setText(f"Velocidad Angular: {msg.twist.angular.z:.2f} rad/s")
+
+    def update_odometry_labels(self):
+        if self.odom_node.position is not None:
+            x, y, z = self.odom_node.position
+            ts = self.odom_node.timestamp
+            self.odom_pos_label.setText(f"Posición: x={x:.2f}, y={y:.2f}, z={z:.2f}")
+            self.odom_time_label.setText(f"Timestamp: {int(ts)}")
+
 
 
     def handle_joystick_move(self, dx: float, dy: float):
@@ -405,8 +472,9 @@ def handle_sigint(*args):
 def main():
     rclpy.init()
     node = RosUINode()
+    odom_node = OdometrySubscriber()
     app = QApplication(sys.argv)
-    win = MainWindow(node)
+    win = MainWindow(node, odom_node)
     win.show()
 
     app.setStyleSheet("""
@@ -475,8 +543,9 @@ def main():
 
     # QTimer para ejecutar spin_once en cada nodo de cámara
     def spin_all():
-        for n in cam_nodes:
+        for n in cam_nodes + [odom_node]:
             rclpy.spin_once(n, timeout_sec=0.01)
+        win.update_odometry_labels()
 
     spin_timer = QTimer()
     spin_timer.timeout.connect(spin_all)
