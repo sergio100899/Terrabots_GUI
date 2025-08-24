@@ -20,6 +20,9 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import cv2
 
+import os
+import random
+import string
 
 class VirtualJoystick(QWidget):
     moved = Signal(float, float)  # dx, dy
@@ -177,7 +180,11 @@ class MainWindow(QMainWindow):
         cameras_box = QGroupBox("Cámaras")
         grid = QGridLayout()
         self.cam_labels = []
+        self.screenshot_buttons = []
         for i in range(4):
+            vbox = QVBoxLayout()
+            
+            # QLabel de cámara
             lbl = QLabel(f"Cam {i+1}\n(pendiente)")
             lbl.setAlignment(Qt.AlignCenter)
             lbl.setMinimumSize(400, 250)
@@ -189,7 +196,18 @@ class MainWindow(QMainWindow):
             """)
             lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self.cam_labels.append(lbl)
-            grid.addWidget(lbl, i // 2, i % 2)
+
+            # Botón de screenshot
+            btn = QPushButton(f"Screenshot Cam {i+1}")
+            btn.clicked.connect(lambda _, cam_id=i: self.take_screenshot(cam_id))
+            self.screenshot_buttons.append(btn)
+
+            vbox.addWidget(lbl)
+            vbox.addWidget(btn)
+
+            grid.addLayout(vbox, i // 2, i % 2)
+
+
         cameras_box.setLayout(grid)
         root.addWidget(cameras_box, 1)
 
@@ -207,6 +225,29 @@ class MainWindow(QMainWindow):
         self.refresh_timer.timeout.connect(self._refresh_topics)
         self.refresh_timer.start(1000)
         self._refresh_topics()
+
+    def take_screenshot(self, cam_id: int):
+        """Guarda screenshot de la cámara cam_id"""
+        if cam_id >= len(self.cam_labels):
+            return
+
+        pixmap = self.cam_labels[cam_id].pixmap()
+        if pixmap is None:
+            print(f"[WARN] No hay imagen en Cam {cam_id+1}")
+            return
+
+        # Crear carpeta screenshots si no existe
+        os.makedirs("screenshots", exist_ok=True)
+
+        # Nombre aleatorio
+        random_name = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        filename = f"screenshots/cam{cam_id+1}_{random_name}.png"
+
+        # Guardar imagen
+        if pixmap.save(filename):
+            print(f"[INFO] Screenshot guardado: {filename}")
+        else:
+            print(f"[ERROR] No se pudo guardar {filename}")
 
     def _spin_once(self):
         try:
