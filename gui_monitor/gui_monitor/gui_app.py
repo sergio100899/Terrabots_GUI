@@ -9,7 +9,9 @@ import signal
 import rclpy
 from rclpy.node import Node
 
-from PySide6.QtCore import Qt, QTimer, QPointF, Signal, QSize
+from PySide6.QtCore import Qt, QTimer, QPointF, Signal, QSize, QBuffer, QIODevice, QThread, QObject
+
+
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QListWidget, QLabel, QPushButton, QGroupBox, QSizePolicy, QFrame
@@ -23,6 +25,50 @@ import cv2
 import os
 import random
 import string
+
+import io
+import requests
+import json
+
+class UploadWorker(QObject):
+    finished = Signal(str)   # para notificar al GUI el path del reporte
+    error = Signal(str)
+
+    def __init__(self, img_bytes: bytes, cam_id: int):
+        super().__init__()
+        self.img_bytes = img_bytes
+        self.cam_id = cam_id
+
+    def run(self):
+        try:
+            files = {
+                "image": (f"cam{self.cam_id+1}.png", self.img_bytes, "image/png")
+            }
+            metadata = {
+                "position": {"x": -12.0464, "y": -77.0428, "z": 123.0},
+                "timestamp": 1724298858
+            }
+
+            data = {
+                "metadata_json": json.dumps(metadata)
+            }
+
+            response = requests.post(
+                "http://localhost:8000/add_landmark/",
+                files=files,
+                data=data,
+                timeout=60
+            )
+            if response.status_code == 201:
+                # out_filename = f"reporte_cam{self.cam_id+1}.docx"
+                # with open(out_filename, "wb") as f:
+                #     f.write(response.content)
+                # self.finished.emit(out_filename)
+                print("Response ok")
+            else:
+                self.error.emit(f"Error {response.status_code}: {response.text}")
+        except Exception as e:
+            self.error.emit(str(e))
 
 class VirtualJoystick(QWidget):
     moved = Signal(float, float)  # dx, dy
@@ -227,27 +273,44 @@ class MainWindow(QMainWindow):
         self._refresh_topics()
 
     def take_screenshot(self, cam_id: int):
-        """Guarda screenshot de la cámara cam_id"""
-        if cam_id >= len(self.cam_labels):
-            return
-
         pixmap = self.cam_labels[cam_id].pixmap()
         if pixmap is None:
             print(f"[WARN] No hay imagen en Cam {cam_id+1}")
             return
 
-        # Crear carpeta screenshots si no existe
-        os.makedirs("screenshots", exist_ok=True)
+        qimage = pixmap.toImage()
+        buffer = QBuffer()
+        buffer.open(QIODevice.ReadWrite)
+        qimage.save(buffer, "PNG")
+        img_bytes = bytes(buffer.data())   # importante: convertir a bytes nativos
+        buffer.close()
 
-        # Nombre aleatorio
-        random_name = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-        filename = f"screenshots/cam{cam_id+1}_{random_name}.png"
+        # Crear worker + hilo
+        self.thread = QThread()
+        self.worker = UploadWorker(img_bytes, cam_id)
+        self.worker.moveToThread(self.thread)
 
-        # Guardar imagen
-        if pixmap.save(filename):
-            print(f"[INFO] Screenshot guardado: {filename}")
-        else:
-            print(f"[ERROR] No se pudo guardar {filename}")
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self.on_report_ready)
+        self.worker.error.connect(self.on_report_error)
+
+        # limpiar al terminar
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.error.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.worker.error.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+
+        self.thread.start()
+        print(f"[INFO] Enviando screenshot de Cam {cam_id+1} en segundo plano...")
+
+    def on_report_ready(self, filepath: str):
+        print(f"[INFO] Reporte guardado en: {filepath}")
+
+    def on_report_error(self, msg: str):
+        print(f"[ERROR] Fallo al generar reporte: {msg}")
+
+
 
     def _spin_once(self):
         try:
@@ -270,18 +333,13 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.topic_status.setText(f"Error listando tópicos: {e}")
 
-    # def publish_cmd_vel(self):
-    #     msg = TwistStamped()
-    #     msg.twist.linear.x = self.current_dy * 0.2     # escala máxima: 0.2 m/s
-    #     msg.twist.angular.z = self.current_dx * 1.0    # escala máxima: 1.0 rad/s
-    #     self.cmd_vel_pub.publish(msg)
 
     def publish_cmd_vel(self):
         
         msg = TwistStamped()
         msg.header.stamp = self.node.get_clock().now().to_msg()
         msg.twist.linear.x = self.current_dy * 0.2
-        msg.twist.angular.z = self.current_dx * 1.0
+        msg.twist.angular.z = -self.current_dx * 1.0
         self.cmd_vel_pub.publish(msg)
 
         # Actualizar labels con valores en vivo
