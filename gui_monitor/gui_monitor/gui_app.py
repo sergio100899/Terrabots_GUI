@@ -94,6 +94,57 @@ class UploadWorker(QObject):
         except Exception as e:
             self.error.emit(str(e))
 
+
+class TrajectoryCanvas(QWidget):
+    def __init__(self, odom_node: OdometrySubscriber):
+        super().__init__()
+        self.odom_node = odom_node
+        self.positions = []  # lista de (x, y)
+        self.setMinimumHeight(250)
+        self.scale = 40.0  # metros → pixeles
+        self.offset = QPointF(200, 200)  # centro del canvas
+
+    def paintEvent(self, event):
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.Antialiasing)
+        qp.fillRect(self.rect(), Qt.black)
+
+        # ejes
+        qp.setPen(QPen(Qt.gray, 1, Qt.DashLine))
+        qp.drawLine(0, self.offset.y(), self.width(), self.offset.y())
+        qp.drawLine(self.offset.x(), 0, self.offset.x(), self.height())
+
+        # trayectoria
+        if len(self.positions) > 1:
+            qp.setPen(QPen(Qt.green, 2))
+            prev = self.to_canvas(self.positions[0])
+            for pos in self.positions[1:]:
+                current = self.to_canvas(pos)
+                qp.drawLine(prev, current)
+                prev = current
+
+        # robot actual
+        if self.positions:
+            qp.setBrush(QColor(255, 0, 0))
+            qp.setPen(QPen(Qt.red, 2))
+            last = self.to_canvas(self.positions[-1])
+            qp.drawEllipse(last, 5, 5)
+
+    def to_canvas(self, pos):
+        x, y = pos
+        return QPointF(self.offset.x() + x * self.scale,
+                       self.offset.y() - y * self.scale)
+
+    def update_positions(self):
+        if self.odom_node.position is not None:
+            x, y, _ = self.odom_node.position
+            self.positions.append((x, y))
+            if len(self.positions) > 1000:  # limitar buffer
+                self.positions.pop(0)
+        self.update()
+
+
+
 class VirtualJoystick(QWidget):
     moved = Signal(float, float)  # dx, dy
     released = Signal()
@@ -197,6 +248,8 @@ class MainWindow(QMainWindow):
 
         root = QHBoxLayout()
 
+        left_col = QVBoxLayout()
+
         # ─────────────── Lista de tópicos ───────────────
         topics_box = QGroupBox("Tópicos (auto)")
         topics_v = QVBoxLayout()
@@ -206,7 +259,17 @@ class MainWindow(QMainWindow):
         topics_v.addWidget(self.topic_status)
         topics_box.setLayout(topics_v)
         topics_box.setMinimumWidth(360)
-        root.addWidget(topics_box, 0)
+        left_col.addWidget(topics_box, 0)
+
+        # ─────────────── Trayectoria ───────────────
+        trajectory_box = QGroupBox("Trayectoria del robot")
+        traj_layout = QVBoxLayout()
+        self.traj_canvas = TrajectoryCanvas(self.odom_node)
+        traj_layout.addWidget(self.traj_canvas)
+        trajectory_box.setLayout(traj_layout)
+        left_col.addWidget(trajectory_box, 0)
+
+        root.addLayout(left_col, 0)
 
         # ─────────────── Controles del robot ───────────────
         controls_box = QGroupBox("Controles del robot")
@@ -534,6 +597,8 @@ def main():
         for n in cam_nodes + [odom_node]:
             rclpy.spin_once(n, timeout_sec=0.01)
         win.update_odometry_labels()
+        win.traj_canvas.update_positions()
+
 
     spin_timer = QTimer()
     spin_timer.timeout.connect(spin_all)
