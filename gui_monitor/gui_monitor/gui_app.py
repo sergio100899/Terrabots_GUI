@@ -86,47 +86,6 @@ class UploadTask(QRunnable):
         except Exception as e:
             print(f"[ERROR] Cam {self.cam_id+1}: {e}")
 
-class UploadWorker(QObject):
-    finished = Signal(str)
-    error = Signal(str)
-
-    def __init__(self, img_bytes: bytes, cam_id: int, position=None, timestamp=None):  ### NUEVO
-        super().__init__()
-        self.img_bytes = img_bytes
-        self.cam_id = cam_id
-        self.position = position
-        self.timestamp = timestamp
-
-    def run(self):
-        try:
-            files = {
-                "image": (f"cam{self.cam_id+1}.png", self.img_bytes, "image/png")
-            }
-            metadata = {
-                "position": {
-                    "x": self.position[0] if self.position else 0.0,
-                    "y": self.position[1] if self.position else 0.0,
-                    "z": self.position[2] if self.position else 0.0
-                },
-                "timestamp": int(self.timestamp) if self.timestamp else 0
-            }
-            data = {"metadata_json": json.dumps(metadata)}
-
-            print(data)
-
-            response = requests.post(
-                "http://localhost:8000/add_landmark/",
-                files=files,
-                data=data,
-                timeout=60
-            )
-            if response.status_code == 201:
-                print("Response ok")
-            else:
-                self.error.emit(f"Error {response.status_code}: {response.text}")
-        except Exception as e:
-            self.error.emit(str(e))
-
 
 class TrajectoryCanvas(QWidget):
     def __init__(self, odom_node: OdometrySubscriber):
