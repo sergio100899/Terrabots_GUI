@@ -206,7 +206,7 @@ class MainWindow(QMainWindow):
         topics_v.addWidget(self.topic_status)
         topics_box.setLayout(topics_v)
         topics_box.setMinimumWidth(360)
-        root.addWidget(topics_box, 1)
+        root.addWidget(topics_box, 0)
 
         # ─────────────── Controles del robot ───────────────
         controls_box = QGroupBox("Controles del robot")
@@ -249,18 +249,6 @@ class MainWindow(QMainWindow):
 
         controls_v.addWidget(odom_box)
 
-
-        # Placeholder para telemetría
-        placeholder_controls = QLabel("Telemetría / Estado / Diagnósticos…")
-        placeholder_controls.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
-        placeholder_controls.setAlignment(Qt.AlignCenter)
-        placeholder_controls.setStyleSheet("background:#222; color:#eee; font-size:14px;")
-        placeholder_controls.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        controls_v.addWidget(placeholder_controls, 1)
-
-        controls_box.setLayout(controls_v)
-        root.addWidget(controls_box, 1)
-
         # Placeholder para telemetría y estado
         placeholder_controls = QLabel("Telemetría / Estado / Diagnósticos…")
         placeholder_controls.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
@@ -270,7 +258,7 @@ class MainWindow(QMainWindow):
         controls_v.addWidget(placeholder_controls, 1)
 
         controls_box.setLayout(controls_v)
-        root.addWidget(controls_box, 1)
+        root.addWidget(controls_box, 0)
 
         # ─────────────── Cámaras ───────────────
         cameras_box = QGroupBox("Cámaras")
@@ -314,7 +302,7 @@ class MainWindow(QMainWindow):
 
 
         cameras_box.setLayout(grid)
-        root.addWidget(cameras_box, 1)
+        root.addWidget(cameras_box, 0)
 
         container = QWidget()
         container.setLayout(root)
