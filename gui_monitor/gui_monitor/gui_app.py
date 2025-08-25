@@ -10,8 +10,7 @@ import signal
 import rclpy
 from rclpy.node import Node
 
-from PySide6.QtCore import Qt, QTimer, QPointF, Signal, QSize, QBuffer, QIODevice, QThread, QObject
-
+from PySide6.QtCore import Qt, QTimer, QPointF, Signal, QSize, QBuffer, QIODevice, QThread, QObject, QRunnable, QThreadPool, Slot
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -52,6 +51,40 @@ class OdometrySubscriber(Node):
             msg.pose.pose.position.z
         )
         self.timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+
+class UploadTask(QRunnable):
+    def __init__(self, img_bytes, cam_id, position=None, timestamp=None):
+        super().__init__()
+        self.img_bytes = img_bytes
+        self.cam_id = cam_id
+        self.position = position
+        self.timestamp = timestamp
+
+    def run(self):
+        try:
+            files = {"image": (f"cam{self.cam_id+1}.png", self.img_bytes, "image/png")}
+            metadata = {
+                "position": {
+                    "x": self.position[0] if self.position else 0.0,
+                    "y": self.position[1] if self.position else 0.0,
+                    "z": self.position[2] if self.position else 0.0,
+                },
+                "timestamp": int(self.timestamp) if self.timestamp else 0,
+            }
+            data = {"metadata_json": json.dumps(metadata)}
+
+            response = requests.post(
+                "http://localhost:8000/add_landmark/",
+                files=files,
+                data=data,
+                timeout=60,
+            )
+            if response.status_code == 201:
+                print(f"[INFO] Cam {self.cam_id+1}: upload OK")
+            else:
+                print(f"[ERROR] Cam {self.cam_id+1}: {response.status_code} {response.text}")
+        except Exception as e:
+            print(f"[ERROR] Cam {self.cam_id+1}: {e}")
 
 class UploadWorker(QObject):
     finished = Signal(str)
@@ -237,6 +270,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.node = node
         self.odom_node = odom_node
+        self.threadpool = QThreadPool()
         self.cmd_vel_pub = self.node.create_publisher(TwistStamped, "/cmd_vel", 10)
         self.current_dx = 0.0
         self.current_dy = 0.0
@@ -392,27 +426,12 @@ class MainWindow(QMainWindow):
         buffer = QBuffer()
         buffer.open(QIODevice.ReadWrite)
         qimage.save(buffer, "PNG")
-        img_bytes = bytes(buffer.data())   # importante: convertir a bytes nativos
+        img_bytes = bytes(buffer.data())
         buffer.close()
 
-        # Crear worker + hilo
-        self.thread = QThread()
-        self.worker = UploadWorker(img_bytes, cam_id, position=self.odom_node.position, timestamp=self.odom_node.timestamp)
-        self.worker.moveToThread(self.thread)
-
-        self.thread.started.connect(self.worker.run)
-        self.worker.finished.connect(self.on_report_ready)
-        self.worker.error.connect(self.on_report_error)
-
-        # limpiar al terminar
-        self.worker.finished.connect(self.thread.quit)
-        self.worker.error.connect(self.thread.quit)
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.worker.error.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
-
-        self.thread.start()
-        print(f"[INFO] Enviando screenshot de Cam {cam_id+1} en segundo plano...")
+        task = UploadTask(img_bytes, cam_id, self.odom_node.position, self.odom_node.timestamp)
+        self.threadpool.start(task)
+        print(f"[INFO] Enviando screenshot Cam {cam_id+1} (threadpool)...")
 
     def on_report_ready(self, filepath: str):
         print(f"[INFO] Reporte guardado en: {filepath}")
