@@ -2,6 +2,7 @@
 
 from geometry_msgs.msg import TwistStamped
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
 
 import sys
 from typing import List, Tuple
@@ -29,7 +30,38 @@ import string
 import io
 import requests
 import json
+import math
 
+
+class LidarNode(Node, QObject):
+    obstacle_signal = Signal(bool)  # señal Qt
+
+    def __init__(self, topic="/panther/cx/scan", threshold=0.5):
+        Node.__init__(self, "lidar_node")
+        QObject.__init__(self)
+
+        self.threshold = threshold
+        self.sub = self.create_subscription(
+            LaserScan,
+            topic,
+            self.lidar_callback,
+            10
+        )
+
+    def lidar_callback(self, msg: LaserScan):
+        # Filtrar valores válidos
+        vals = [
+            r for r in msg.ranges
+            if not math.isnan(r) and not math.isinf(r)
+            and msg.range_min <= r <= msg.range_max
+        ]
+        if not vals:
+            return
+
+        min_dist = min(vals)
+        danger = min_dist < self.threshold
+        # Emitimos señal para la GUI
+        self.obstacle_signal.emit(danger)
 
 class OdometrySubscriber(Node):
     def __init__(self):
@@ -233,10 +265,11 @@ class RosUINode(Node):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, node: RosUINode, odom_node: OdometrySubscriber):
+    def __init__(self, node: RosUINode, odom_node: OdometrySubscriber, lidar_node):
         super().__init__()
         self.node = node
         self.odom_node = odom_node
+        self.lidar_node = lidar_node
         self.threadpool = QThreadPool()
         self.cmd_vel_pub = self.node.create_publisher(TwistStamped, "/cmd_vel", 10)
         self.current_dx = 0.0
@@ -252,7 +285,7 @@ class MainWindow(QMainWindow):
         left_col = QVBoxLayout()
 
         # ─────────────── Lista de tópicos ───────────────
-        topics_box = QGroupBox("Tópicos (auto)")
+        topics_box = QGroupBox("Topics List")
         topics_v = QVBoxLayout()
         self.topic_list = QListWidget()
         self.topic_status = QLabel("—")
@@ -261,6 +294,31 @@ class MainWindow(QMainWindow):
         topics_box.setLayout(topics_v)
         topics_box.setMinimumWidth(300)
         left_col.addWidget(topics_box, 0)
+
+        # ─────────────── Panel: Seguridad / Bloqueo ───────────────
+        safety_box = QGroupBox("Safety")
+        safety_layout = QVBoxLayout()
+        self.safety_switch = QPushButton("Joystick enabled")
+        self.safety_switch.setCheckable(True)
+        self.safety_switch.setChecked(False)
+        self.update_safety_button_style(False)  # arranca en rojo
+        self.safety_switch.toggled.connect(self.handle_safety_toggle)
+        safety_layout.addWidget(self.safety_switch)
+        safety_box.setLayout(safety_layout)
+        left_col.addWidget(safety_box, 0)
+
+
+        # ─────────────── Panel: Alerta de obstáculos ───────────────
+        alert_box = QGroupBox("Obstacle Alert")
+        alert_layout = QVBoxLayout()
+        self.alert_panel = QLabel("Área libre")
+        self.alert_panel.setAlignment(Qt.AlignCenter)
+        self.alert_panel.setStyleSheet("QLabel { background-color: lightgray; font-size: 18px; }")
+        alert_layout.addWidget(self.alert_panel)
+        alert_box.setLayout(alert_layout)
+        left_col.addWidget(alert_box, 1)  # ocupa más espacio
+
+        self.lidar_node.obstacle_signal.connect(self.handle_lidar_alert)
 
         # # ─────────────── Trayectoria ───────────────
         # trajectory_box = QGroupBox("Trayectoria del robot")
@@ -273,7 +331,7 @@ class MainWindow(QMainWindow):
         root.addLayout(left_col, 0)
 
         # ─────────────── Controles del robot ───────────────
-        controls_box = QGroupBox("Controles del robot")
+        controls_box = QGroupBox("Robot Controls")
         controls_v = QVBoxLayout()
 
         # Joystick virtual
@@ -283,7 +341,7 @@ class MainWindow(QMainWindow):
         controls_v.addWidget(self.joystick, alignment=Qt.AlignCenter)
 
         # ─────────────── Bloque: Velocidades en vivo ───────────────
-        vel_box = QGroupBox("Velocidades (cmd_vel)")
+        vel_box = QGroupBox("Velocities")
         vel_layout = QVBoxLayout()
 
         self.linear_vel_label = QLabel("Lineal: 0.00 m/s")
@@ -298,7 +356,7 @@ class MainWindow(QMainWindow):
         controls_v.addWidget(vel_box)
 
         # ─────────────── Bloque: Odometría ───────────────
-        odom_box = QGroupBox("Odometría")
+        odom_box = QGroupBox("Odometry")
         odom_layout = QVBoxLayout()
 
         self.odom_pos_label = QLabel("Posición: x=0.00, y=0.00, z=0.00")
@@ -325,7 +383,7 @@ class MainWindow(QMainWindow):
         # root.addWidget(controls_box, 1)
 
         # ─────────────── Trayectoria ───────────────
-        trajectory_box = QGroupBox("Trayectoria del robot")
+        trajectory_box = QGroupBox("Robot Path")
         traj_layout = QVBoxLayout()
         self.traj_canvas = TrajectoryCanvas(self.odom_node)
         traj_layout.addWidget(self.traj_canvas, 1)
@@ -336,7 +394,7 @@ class MainWindow(QMainWindow):
         root.addWidget(controls_box, 1)
 
         # ─────────────── Cámaras ───────────────
-        cameras_box = QGroupBox("Cámaras")
+        cameras_box = QGroupBox("Cameras")
         grid = QGridLayout()
         self.cam_labels = []
         self.screenshot_buttons = []
@@ -479,6 +537,44 @@ class MainWindow(QMainWindow):
         finally:
             super().closeEvent(event)
 
+    def handle_safety_toggle(self, enabled: bool):
+        if enabled:
+            # Bloquear joystick
+            self.joystick.setEnabled(False)
+            # Resetear velocidades
+            self.current_dx = 0.0
+            self.current_dy = 0.0
+            self.publish_cmd_vel()
+            self.safety_switch.setText("Joystick bloqueado")
+        else:
+            # Habilitar joystick
+            self.joystick.setEnabled(True)
+            self.safety_switch.setText("Joystick habilitado")
+
+        # Actualizar color del botón
+        self.update_safety_button_style(enabled)
+
+
+    def update_safety_button_style(self, enabled: bool):
+        if enabled:
+            self.safety_switch.setStyleSheet(
+                "QPushButton { background-color: red; color: white; font-weight: bold; }"
+            )
+        else:
+            self.safety_switch.setStyleSheet(
+                "QPushButton { background-color: green; color: white; font-weight: bold; }"
+            )
+
+    def handle_lidar_alert(self, danger: bool):
+        if danger:
+            self.alert_panel.setStyleSheet("QLabel { background-color: red; font-size: 18px; }")
+            self.alert_panel.setText("⚠️ OBSTÁCULO DETECTADO ⚠️")
+        else:
+            self.alert_panel.setStyleSheet("QLabel { background-color: green; font-size: 18px; }")
+            self.alert_panel.setText("Área libre")
+
+
+
 class ImageSubscriber(Node):
     def __init__(self, label: QLabel, topic="/camera/image_raw"):
         super().__init__('image_viewer')
@@ -521,8 +617,9 @@ def main():
     rclpy.init()
     node = RosUINode()
     odom_node = OdometrySubscriber()
+    lidar_node = LidarNode("/panther/cx/scan", threshold=0.5)
     app = QApplication(sys.argv)
-    win = MainWindow(node, odom_node)
+    win = MainWindow(node, odom_node, lidar_node)
     win.show()
 
     app.setStyleSheet("""
@@ -591,7 +688,7 @@ def main():
 
     # QTimer para ejecutar spin_once en cada nodo de cámara
     def spin_all():
-        for n in cam_nodes + [odom_node]:
+        for n in cam_nodes + [odom_node, lidar_node]:
             rclpy.spin_once(n, timeout_sec=0.01)
         win.update_odometry_labels()
         win.traj_canvas.update_positions()
