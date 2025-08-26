@@ -37,7 +37,7 @@ TOPICS = {
     "odom": "/odom",
     "twist": "/twist",
     "cmd_vel": "/cmd_vel",
-    "lidar": "/panther/cx/scan",
+    "lidar": "/scan",
     "camera_front": "/camera/image_raw",
     "camera_rear": "/camera2/image_raw",
     "camera_left": "/camera3/image_raw",
@@ -47,6 +47,7 @@ TOPICS = {
 
 class LidarNode(Node, QObject):
     obstacle_signal = Signal(bool, float)
+    scan_signal = Signal()
 
     def __init__(self, topic=TOPICS["lidar"], threshold=0.5):
         Node.__init__(self, "lidar_node")
@@ -54,6 +55,7 @@ class LidarNode(Node, QObject):
 
         # self.threshold = threshold
         self.distance_threshold = threshold
+        self.last_scan = None 
         
         self.sub = self.create_subscription(
             LaserScan,
@@ -63,6 +65,7 @@ class LidarNode(Node, QObject):
         )
 
     def lidar_callback(self, msg: LaserScan):
+        self.last_scan = msg  
         # Filtrar valores válidos
         vals = [
             r for r in msg.ranges
@@ -77,6 +80,7 @@ class LidarNode(Node, QObject):
         danger = min_dist < self.distance_threshold
         # Emitimos señal para la GUI
         self.obstacle_signal.emit(danger, min_dist)
+        self.scan_signal.emit() 
 
 class OdometrySubscriber(Node):
     def __init__(self, topic=TOPICS["odom"]):
@@ -135,9 +139,10 @@ class UploadTask(QRunnable):
 
 
 class TrajectoryCanvas(QWidget):
-    def __init__(self, odom_node: OdometrySubscriber):
+    def __init__(self, odom_node: OdometrySubscriber, lidar_node: LidarNode):
         super().__init__()
         self.odom_node = odom_node
+        self.lidar_node = lidar_node 
         self.positions = []
         self.scale = 40.0
         self.offset = None
@@ -150,16 +155,15 @@ class TrajectoryCanvas(QWidget):
         qp = QPainter(self)
         qp.setRenderHint(QPainter.Antialiasing)
 
-        # Fondo negro
         qp.fillRect(self.rect(), Qt.black)
 
         if not self.positions:
             return
 
-        # Última posición → referencia (robot siempre en el centro)
+        # Referencia robot
         ref_x, ref_y = self.positions[-1]
 
-        # Dibujar trayectoria relativa
+        # Dibujar trayectoria
         qp.setPen(QPen(Qt.green, 2))
         prev = self.to_canvas(self.positions[0], ref_x, ref_y)
         for pos in self.positions[1:]:
@@ -167,15 +171,30 @@ class TrajectoryCanvas(QWidget):
             qp.drawLine(prev, current)
             prev = current
 
-        # Ejes centrados en el robot
+        # Ejes
         qp.setPen(QPen(Qt.gray, 1, Qt.DashLine))
         qp.drawLine(0, self.offset.y(), self.width(), self.offset.y())
         qp.drawLine(self.offset.x(), 0, self.offset.x(), self.height())
 
-        # Robot fijo en el centro
+        # Robot
         qp.setBrush(QColor(255, 0, 0))
         qp.setPen(QPen(Qt.red, 2))
         qp.drawEllipse(self.offset, 6, 6)
+
+        # 🔹 Dibujar LiDAR si hay datos
+        if self.lidar_node.last_scan:
+            qp.setPen(QPen(Qt.yellow, 1))
+            angle = self.lidar_node.last_scan.angle_min
+            for r in self.lidar_node.last_scan.ranges:
+                if not math.isinf(r) and not math.isnan(r):
+                    # Convertir a coordenadas relativas
+                    lx = r * math.cos(angle)
+                    ly = r * math.sin(angle)
+                    # Convertir a canvas (relativo al robot)
+                    pt = self.to_canvas((ref_x + lx, ref_y + ly), ref_x, ref_y)
+                    qp.drawPoint(pt)
+                angle += self.lidar_node.last_scan.angle_increment
+
 
     def to_canvas(self, pos, ref_x, ref_y):
         """Convierte coordenadas a canvas, centrando el robot"""
@@ -286,6 +305,8 @@ class MainWindow(QMainWindow):
         self.odom_node = odom_node
         self.lidar_node = lidar_node
         self.lidar_node.obstacle_signal.connect(self.handle_lidar_alert)
+        
+
         self.threadpool = QThreadPool()
         self.cmd_vel_pub = self.node.create_publisher(TwistStamped, TOPICS["cmd_vel"], 10)
         self.current_dx = 0.0
@@ -432,7 +453,8 @@ class MainWindow(QMainWindow):
         # ─────────────── Trayectoria ───────────────
         trajectory_box = QGroupBox("Robot Path")
         traj_layout = QVBoxLayout()
-        self.traj_canvas = TrajectoryCanvas(self.odom_node)
+        self.traj_canvas = TrajectoryCanvas(self.odom_node, self.lidar_node)
+        self.lidar_node.scan_signal.connect(self.traj_canvas.update)
         traj_layout.addWidget(self.traj_canvas, 1)
         trajectory_box.setLayout(traj_layout)
         controls_v.addWidget(trajectory_box, 1)
@@ -761,6 +783,8 @@ def main():
             rclpy.spin_once(n, timeout_sec=0.01)
         win.update_odometry_labels()
         win.traj_canvas.update_positions()
+        win.traj_canvas.update()
+
 
 
     spin_timer = QTimer()
