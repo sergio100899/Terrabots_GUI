@@ -22,6 +22,7 @@ setup(
     entry_points={
         'console_scripts': [
             'gui_monitor = gui_monitor.gui_app:main',
+            'add_pose_callback = gui_monitor.add_pose_callback:main',
         ],
     },
 )

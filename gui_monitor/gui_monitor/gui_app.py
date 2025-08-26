@@ -91,31 +91,59 @@ class TrajectoryCanvas(QWidget):
     def __init__(self, odom_node: OdometrySubscriber):
         super().__init__()
         self.odom_node = odom_node
-        self.positions = []  # lista de (x, y)
-        self.setMinimumHeight(250)
-        self.scale = 40.0  # metros → pixeles
-        self.offset = QPointF(200, 200)  # centro del canvas
+        self.positions = []
+        self.scale = 40.0
+        self.offset = None
+        self.origin = None
+        self.buffer = None  # QPixmap para trayectoria
 
-    def paintEvent(self, event):
-        qp = QPainter(self)
-        qp.setRenderHint(QPainter.Antialiasing)
-        qp.fillRect(self.rect(), Qt.black)
+    def resizeEvent(self, event):
+        self.offset = QPointF(self.width() / 2, self.height() / 2)
 
-        # ejes
-        qp.setPen(QPen(Qt.gray, 1, Qt.DashLine))
-        qp.drawLine(0, self.offset.y(), self.width(), self.offset.y())
-        qp.drawLine(self.offset.x(), 0, self.offset.x(), self.height())
+        # recrear buffer con nuevo tamaño
+        self.buffer = QPixmap(self.size())
+        self.buffer.fill(Qt.black)
 
-        # trayectoria
-        if len(self.positions) > 1:
+        # Redibujar toda la trayectoria en el buffer
+        if self.positions:
+            qp = QPainter(self.buffer)
+            qp.setRenderHint(QPainter.Antialiasing)
             qp.setPen(QPen(Qt.green, 2))
             prev = self.to_canvas(self.positions[0])
             for pos in self.positions[1:]:
                 current = self.to_canvas(pos)
                 qp.drawLine(prev, current)
                 prev = current
+            qp.end()
 
-        # robot actual
+        super().resizeEvent(event)
+
+    def add_position(self, pos):
+        """Añadir posición y actualizar solo el buffer"""
+        self.positions.append(pos)
+        if self.buffer and len(self.positions) > 1:
+            qp = QPainter(self.buffer)
+            qp.setPen(QPen(Qt.green, 2))
+            prev = self.to_canvas(self.positions[-2])
+            current = self.to_canvas(self.positions[-1])
+            qp.drawLine(prev, current)
+            qp.end()
+        self.update()
+
+    def paintEvent(self, event):
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.Antialiasing)
+
+        # Pintar buffer con trayectoria
+        if self.buffer:
+            qp.drawPixmap(0, 0, self.buffer)
+
+        # Ejes encima
+        qp.setPen(QPen(Qt.gray, 1, Qt.DashLine))
+        qp.drawLine(0, self.offset.y(), self.width(), self.offset.y())
+        qp.drawLine(self.offset.x(), 0, self.offset.x(), self.height())
+
+        # Robot actual
         if self.positions:
             qp.setBrush(QColor(255, 0, 0))
             qp.setPen(QPen(Qt.red, 2))
@@ -123,17 +151,23 @@ class TrajectoryCanvas(QWidget):
             qp.drawEllipse(last, 5, 5)
 
     def to_canvas(self, pos):
+        """Convierte coordenadas del robot a coordenadas de canvas"""
         x, y = pos
-        return QPointF(self.offset.x() + x * self.scale,
-                       self.offset.y() - y * self.scale)
+        return QPointF(
+            self.offset.x() + x * self.scale,
+            self.offset.y() - y * self.scale
+        )
 
     def update_positions(self):
         if self.odom_node.position is not None:
             x, y, _ = self.odom_node.position
-            self.positions.append((x, y))
-            if len(self.positions) > 1000:  # limitar buffer
-                self.positions.pop(0)
-        self.update()
+            if self.origin is None:
+                self.origin = (x, y)
+            rel_x = x - self.origin[0]
+            rel_y = y - self.origin[1]
+            self.add_position((rel_x, rel_y))
+
+
 
 
 
@@ -251,16 +285,16 @@ class MainWindow(QMainWindow):
         topics_v.addWidget(self.topic_list, 1)
         topics_v.addWidget(self.topic_status)
         topics_box.setLayout(topics_v)
-        topics_box.setMinimumWidth(360)
+        topics_box.setMinimumWidth(300)
         left_col.addWidget(topics_box, 0)
 
-        # ─────────────── Trayectoria ───────────────
-        trajectory_box = QGroupBox("Trayectoria del robot")
-        traj_layout = QVBoxLayout()
-        self.traj_canvas = TrajectoryCanvas(self.odom_node)
-        traj_layout.addWidget(self.traj_canvas)
-        trajectory_box.setLayout(traj_layout)
-        left_col.addWidget(trajectory_box, 0)
+        # # ─────────────── Trayectoria ───────────────
+        # trajectory_box = QGroupBox("Trayectoria del robot")
+        # traj_layout = QVBoxLayout()
+        # self.traj_canvas = TrajectoryCanvas(self.odom_node)
+        # traj_layout.addWidget(self.traj_canvas)
+        # trajectory_box.setLayout(traj_layout)
+        # left_col.addWidget(trajectory_box, 0)
 
         root.addLayout(left_col, 0)
 
@@ -305,16 +339,27 @@ class MainWindow(QMainWindow):
 
         controls_v.addWidget(odom_box)
 
-        # Placeholder para telemetría y estado
-        placeholder_controls = QLabel("Telemetría / Estado / Diagnósticos…")
-        placeholder_controls.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
-        placeholder_controls.setAlignment(Qt.AlignCenter)
-        placeholder_controls.setStyleSheet("background:#222; color:#eee; font-size:14px;")
-        placeholder_controls.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        controls_v.addWidget(placeholder_controls, 1)
+        # # Placeholder para telemetría y estado
+        # placeholder_controls = QLabel("Telemetría / Estado / Diagnósticos…")
+        # placeholder_controls.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
+        # placeholder_controls.setAlignment(Qt.AlignCenter)
+        # placeholder_controls.setStyleSheet("background:#222; color:#eee; font-size:14px;")
+        # placeholder_controls.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # controls_v.addWidget(placeholder_controls, 1)
+
+        # controls_box.setLayout(controls_v)
+        # root.addWidget(controls_box, 1)
+
+        # ─────────────── Trayectoria ───────────────
+        trajectory_box = QGroupBox("Trayectoria del robot")
+        traj_layout = QVBoxLayout()
+        self.traj_canvas = TrajectoryCanvas(self.odom_node)
+        traj_layout.addWidget(self.traj_canvas, 1)
+        trajectory_box.setLayout(traj_layout)
+        controls_v.addWidget(trajectory_box, 1)
 
         controls_box.setLayout(controls_v)
-        root.addWidget(controls_box, 0)
+        root.addWidget(controls_box, 1)
 
         # ─────────────── Cámaras ───────────────
         cameras_box = QGroupBox("Cámaras")
@@ -358,7 +403,7 @@ class MainWindow(QMainWindow):
 
 
         cameras_box.setLayout(grid)
-        root.addWidget(cameras_box, 0)
+        root.addWidget(cameras_box, 1)
 
         container = QWidget()
         container.setLayout(root)
@@ -489,7 +534,7 @@ class ImageSubscriber(Node):
         self.label.setPixmap(pixmap.scaled(
             self.label.width(),
             self.label.height(),
-            Qt.KeepAspectRatioByExpanding
+            Qt.KeepAspectRatio, Qt.SmoothTransformation
         ))
 
 
