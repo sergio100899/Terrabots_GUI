@@ -15,7 +15,7 @@ from PySide6.QtCore import Qt, QTimer, QPointF, Signal, QSize, QBuffer, QIODevic
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QListWidget, QLabel, QPushButton, QGroupBox, QSizePolicy, QFrame
+    QListWidget, QLabel, QPushButton, QGroupBox, QSizePolicy, QFrame, QDoubleSpinBox
 )
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen
 
@@ -52,7 +52,9 @@ class LidarNode(Node, QObject):
         Node.__init__(self, "lidar_node")
         QObject.__init__(self)
 
-        self.threshold = threshold
+        # self.threshold = threshold
+        self.distance_threshold = threshold
+        
         self.sub = self.create_subscription(
             LaserScan,
             topic,
@@ -71,8 +73,8 @@ class LidarNode(Node, QObject):
             return
 
         min_dist = min(vals)
-        danger = min_dist < self.threshold
-
+        # danger = min_dist < self.threshold
+        danger = min_dist < self.distance_threshold
         # Emitimos señal para la GUI
         self.obstacle_signal.emit(danger, min_dist)
 
@@ -344,6 +346,26 @@ class MainWindow(QMainWindow):
         alert_box.setLayout(alert_layout)
         left_col.addWidget(alert_box, 1)
 
+        # ----------------------
+        # Panel de configuración del Lidar
+        # ----------------------
+        threshold_layout = QHBoxLayout()
+        threshold_label = QLabel("Min Distance Threshold (m):")
+        self.threshold_spinbox = QDoubleSpinBox()
+        self.threshold_spinbox.setRange(0.1, 10.0)   # valores permitidos
+        self.threshold_spinbox.setValue(self.lidar_node.distance_threshold)  # valor inicial = 0.5
+        self.threshold_spinbox.setSingleStep(0.1)
+
+        # conectar cambio al lidar_node
+        self.threshold_spinbox.valueChanged.connect(self.update_lidar_threshold)
+
+        threshold_layout.addWidget(threshold_label)
+        threshold_layout.addWidget(self.threshold_spinbox)
+
+        # agregamos al layout principal
+        left_col.addLayout(threshold_layout)
+
+
 
         # # ─────────────── Trayectoria ───────────────
         # trajectory_box = QGroupBox("Trayectoria del robot")
@@ -476,6 +498,11 @@ class MainWindow(QMainWindow):
         self.refresh_timer.timeout.connect(self._refresh_topics)
         self.refresh_timer.start(1000)
         self._refresh_topics()
+
+    def update_lidar_threshold(self, value):
+        self.lidar_node.distance_threshold = value
+        print(f"[GUI] Distancia mínima actualizada a {value:.2f} m")
+
 
     def take_screenshot(self, cam_id: int):
         pixmap = self.cam_labels[cam_id].pixmap()
