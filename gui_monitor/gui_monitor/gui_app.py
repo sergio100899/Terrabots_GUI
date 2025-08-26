@@ -289,7 +289,7 @@ class MainWindow(QMainWindow):
         self.cmd_timer = QTimer()
         self.cmd_timer.timeout.connect(self.publish_cmd_vel)
         self.cmd_timer.start(100)  # publica cada 100ms
-        self.setWindowTitle("Panel de Control del Robot")
+        self.setWindowTitle("Robot Control Panel")
         self.resize(1280, 800)
 
         root = QHBoxLayout()
