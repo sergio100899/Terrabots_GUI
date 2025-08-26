@@ -94,80 +94,54 @@ class TrajectoryCanvas(QWidget):
         self.positions = []
         self.scale = 40.0
         self.offset = None
-        self.origin = None
-        self.buffer = None  # QPixmap para trayectoria
 
     def resizeEvent(self, event):
         self.offset = QPointF(self.width() / 2, self.height() / 2)
-
-        # recrear buffer con nuevo tamaño
-        self.buffer = QPixmap(self.size())
-        self.buffer.fill(Qt.black)
-
-        # Redibujar toda la trayectoria en el buffer
-        if self.positions:
-            qp = QPainter(self.buffer)
-            qp.setRenderHint(QPainter.Antialiasing)
-            qp.setPen(QPen(Qt.green, 2))
-            prev = self.to_canvas(self.positions[0])
-            for pos in self.positions[1:]:
-                current = self.to_canvas(pos)
-                qp.drawLine(prev, current)
-                prev = current
-            qp.end()
-
         super().resizeEvent(event)
-
-    def add_position(self, pos):
-        """Añadir posición y actualizar solo el buffer"""
-        self.positions.append(pos)
-        if self.buffer and len(self.positions) > 1:
-            qp = QPainter(self.buffer)
-            qp.setPen(QPen(Qt.green, 2))
-            prev = self.to_canvas(self.positions[-2])
-            current = self.to_canvas(self.positions[-1])
-            qp.drawLine(prev, current)
-            qp.end()
-        self.update()
 
     def paintEvent(self, event):
         qp = QPainter(self)
         qp.setRenderHint(QPainter.Antialiasing)
 
-        # Pintar buffer con trayectoria
-        if self.buffer:
-            qp.drawPixmap(0, 0, self.buffer)
+        # Fondo negro
+        qp.fillRect(self.rect(), Qt.black)
 
-        # Ejes encima
+        if not self.positions:
+            return
+
+        # Última posición → referencia (robot siempre en el centro)
+        ref_x, ref_y = self.positions[-1]
+
+        # Dibujar trayectoria relativa
+        qp.setPen(QPen(Qt.green, 2))
+        prev = self.to_canvas(self.positions[0], ref_x, ref_y)
+        for pos in self.positions[1:]:
+            current = self.to_canvas(pos, ref_x, ref_y)
+            qp.drawLine(prev, current)
+            prev = current
+
+        # Ejes centrados en el robot
         qp.setPen(QPen(Qt.gray, 1, Qt.DashLine))
         qp.drawLine(0, self.offset.y(), self.width(), self.offset.y())
         qp.drawLine(self.offset.x(), 0, self.offset.x(), self.height())
 
-        # Robot actual
-        if self.positions:
-            qp.setBrush(QColor(255, 0, 0))
-            qp.setPen(QPen(Qt.red, 2))
-            last = self.to_canvas(self.positions[-1])
-            qp.drawEllipse(last, 5, 5)
+        # Robot fijo en el centro
+        qp.setBrush(QColor(255, 0, 0))
+        qp.setPen(QPen(Qt.red, 2))
+        qp.drawEllipse(self.offset, 6, 6)
 
-    def to_canvas(self, pos):
-        """Convierte coordenadas del robot a coordenadas de canvas"""
+    def to_canvas(self, pos, ref_x, ref_y):
+        """Convierte coordenadas a canvas, centrando el robot"""
         x, y = pos
-        return QPointF(
-            self.offset.x() + x * self.scale,
-            self.offset.y() - y * self.scale
-        )
+        dx = (x - ref_x) * self.scale
+        dy = (y - ref_y) * self.scale
+        return QPointF(self.offset.x() + dx, self.offset.y() - dy)
 
     def update_positions(self):
         if self.odom_node.position is not None:
             x, y, _ = self.odom_node.position
-            if self.origin is None:
-                self.origin = (x, y)
-            rel_x = x - self.origin[0]
-            rel_y = y - self.origin[1]
-            self.add_position((rel_x, rel_y))
-
-
+            self.positions.append((x, y))
+            self.update()
 
 
 
