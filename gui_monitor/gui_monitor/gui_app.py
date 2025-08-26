@@ -72,6 +72,7 @@ class LidarNode(Node, QObject):
 
         min_dist = min(vals)
         danger = min_dist < self.threshold
+
         # Emitimos señal para la GUI
         self.obstacle_signal.emit(danger, min_dist)
 
@@ -80,7 +81,7 @@ class OdometrySubscriber(Node):
         super().__init__('odometry_subscriber')
         self.subscription = self.create_subscription(
             Odometry,
-            '/odom',
+            topic,
             self.listener_callback,
             10)
         self.subscription  # evitar warning unused
@@ -282,6 +283,7 @@ class MainWindow(QMainWindow):
         self.node = node
         self.odom_node = odom_node
         self.lidar_node = lidar_node
+        self.lidar_node.obstacle_signal.connect(self.handle_lidar_alert)
         self.threadpool = QThreadPool()
         self.cmd_vel_pub = self.node.create_publisher(TwistStamped, TOPICS["cmd_vel"], 10)
         self.current_dx = 0.0
