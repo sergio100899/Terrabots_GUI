@@ -33,10 +33,22 @@ import json
 import math
 
 
-class LidarNode(Node, QObject):
-    obstacle_signal = Signal(bool)  # señal Qt
+TOPICS = {
+    "odom": "/odom",
+    "twist": "/twist",
+    "cmd_vel": "/cmd_vel",
+    "lidar": "/panther/cx/scan",
+    "camera_front": "/camera/image_raw",
+    "camera_rear": "/camera2/image_raw",
+    "camera_left": "/camera3/image_raw",
+    "camera_right": "/camera4/image_raw",
+}
 
-    def __init__(self, topic="/panther/cx/scan", threshold=0.5):
+
+class LidarNode(Node, QObject):
+    obstacle_signal = Signal(bool, float)
+
+    def __init__(self, topic=TOPICS["lidar"], threshold=0.5):
         Node.__init__(self, "lidar_node")
         QObject.__init__(self)
 
@@ -61,10 +73,10 @@ class LidarNode(Node, QObject):
         min_dist = min(vals)
         danger = min_dist < self.threshold
         # Emitimos señal para la GUI
-        self.obstacle_signal.emit(danger)
+        self.obstacle_signal.emit(danger, min_dist)
 
 class OdometrySubscriber(Node):
-    def __init__(self):
+    def __init__(self, topic=TOPICS["odom"]):
         super().__init__('odometry_subscriber')
         self.subscription = self.create_subscription(
             Odometry,
@@ -271,7 +283,7 @@ class MainWindow(QMainWindow):
         self.odom_node = odom_node
         self.lidar_node = lidar_node
         self.threadpool = QThreadPool()
-        self.cmd_vel_pub = self.node.create_publisher(TwistStamped, "/cmd_vel", 10)
+        self.cmd_vel_pub = self.node.create_publisher(TwistStamped, TOPICS["cmd_vel"], 10)
         self.current_dx = 0.0
         self.current_dy = 0.0
         self.cmd_timer = QTimer()
@@ -310,15 +322,26 @@ class MainWindow(QMainWindow):
 
         # ─────────────── Panel: Alerta de obstáculos ───────────────
         alert_box = QGroupBox("Obstacle Alert")
+        alert_box.setFixedHeight(180) 
         alert_layout = QVBoxLayout()
-        self.alert_panel = QLabel("Área libre")
-        self.alert_panel.setAlignment(Qt.AlignCenter)
-        self.alert_panel.setStyleSheet("QLabel { background-color: lightgray; font-size: 18px; }")
-        alert_layout.addWidget(self.alert_panel)
-        alert_box.setLayout(alert_layout)
-        left_col.addWidget(alert_box, 1)  # ocupa más espacio
 
-        self.lidar_node.obstacle_signal.connect(self.handle_lidar_alert)
+        self.alert_panel = QLabel("Free area<br><span style='font-size:14px;'>Min distance: — m</span>")
+        self.alert_panel.setAlignment(Qt.AlignCenter)
+        self.alert_panel.setStyleSheet("""
+            QLabel {
+                background-color: lightgray;
+                font-size: 18px;
+                color: white;
+                padding: 6px;
+                border-radius: 8px;
+            }
+        """)
+        self.alert_panel.setWordWrap(True)  # permite salto si es necesario
+
+        alert_layout.addWidget(self.alert_panel, 1)
+        alert_box.setLayout(alert_layout)
+        left_col.addWidget(alert_box, 1)
+
 
         # # ─────────────── Trayectoria ───────────────
         # trajectory_box = QGroupBox("Trayectoria del robot")
@@ -344,7 +367,7 @@ class MainWindow(QMainWindow):
         vel_box = QGroupBox("Velocities")
         vel_layout = QVBoxLayout()
 
-        self.linear_vel_label = QLabel("Lineal: 0.00 m/s")
+        self.linear_vel_label = QLabel("Linear: 0.00 m/s")
         self.angular_vel_label = QLabel("Angular: 0.00 rad/s")
         for lbl in [self.linear_vel_label, self.angular_vel_label]:
             lbl.setStyleSheet("font-size: 14px; color: #0f0; background:#222; padding:4px;")
@@ -359,7 +382,7 @@ class MainWindow(QMainWindow):
         odom_box = QGroupBox("Odometry")
         odom_layout = QVBoxLayout()
 
-        self.odom_pos_label = QLabel("Posición: x=0.00, y=0.00, z=0.00")
+        self.odom_pos_label = QLabel("Position: x=0.00, y=0.00, z=0.00")
         self.odom_time_label = QLabel("Timestamp: 0.00")
 
         for lbl in [self.odom_pos_label, self.odom_time_label]:
@@ -399,19 +422,19 @@ class MainWindow(QMainWindow):
         self.cam_labels = []
         self.screenshot_buttons = []
 
-        camera_names = ["Frontal", "Trasera", "Izquierda", "Derecha"]
+        camera_names = ["Front", "Rear", "Left", "Right"]
 
         for i, cam_name in enumerate(camera_names):
             vbox = QVBoxLayout()
             
             # Título encima de la cámara
-            title = QLabel(f"Cámara {cam_name}")
+            title = QLabel(f"Camera {cam_name}")
             title.setAlignment(Qt.AlignCenter)
             title.setStyleSheet("font-weight: bold; color: #fff;")
             vbox.addWidget(title)
 
             # QLabel de cámara
-            lbl = QLabel(f"Cam {i+1}\n(pendiente)")
+            lbl = QLabel(f"Cam {i+1}\n(Pending)")
             lbl.setAlignment(Qt.AlignCenter)
             lbl.setMinimumSize(400, 250)
             lbl.setMaximumHeight(300)
@@ -508,14 +531,14 @@ class MainWindow(QMainWindow):
         self.cmd_vel_pub.publish(msg)
 
         # Actualizar labels con valores en vivo
-        self.linear_vel_label.setText(f"Velocidad Lineal: {msg.twist.linear.x:.2f} m/s")
-        self.angular_vel_label.setText(f"Velocidad Angular: {msg.twist.angular.z:.2f} rad/s")
+        self.linear_vel_label.setText(f"Linear velocity: {msg.twist.linear.x:.2f} m/s")
+        self.angular_vel_label.setText(f"Angular velocity: {msg.twist.angular.z:.2f} rad/s")
 
     def update_odometry_labels(self):
         if self.odom_node.position is not None:
             x, y, z = self.odom_node.position
             ts = self.odom_node.timestamp
-            self.odom_pos_label.setText(f"Posición: x={x:.2f}, y={y:.2f}, z={z:.2f}")
+            self.odom_pos_label.setText(f"Position: x={x:.2f}, y={y:.2f}, z={z:.2f}")
             self.odom_time_label.setText(f"Timestamp: {int(ts)}")
 
 
@@ -545,11 +568,11 @@ class MainWindow(QMainWindow):
             self.current_dx = 0.0
             self.current_dy = 0.0
             self.publish_cmd_vel()
-            self.safety_switch.setText("Joystick bloqueado")
+            self.safety_switch.setText("Joystick disabled")
         else:
             # Habilitar joystick
             self.joystick.setEnabled(True)
-            self.safety_switch.setText("Joystick habilitado")
+            self.safety_switch.setText("Joystick enabled")
 
         # Actualizar color del botón
         self.update_safety_button_style(enabled)
@@ -565,18 +588,35 @@ class MainWindow(QMainWindow):
                 "QPushButton { background-color: green; color: white; font-weight: bold; }"
             )
 
-    def handle_lidar_alert(self, danger: bool):
-        if danger:
-            self.alert_panel.setStyleSheet("QLabel { background-color: red; font-size: 18px; }")
-            self.alert_panel.setText("⚠️ OBSTÁCULO DETECTADO ⚠️")
+
+    def handle_lidar_alert(self, is_obstacle, min_dist):
+        if is_obstacle:
+            self.alert_panel.setStyleSheet("""
+                QLabel {
+                    background-color: red;
+                    font-size: 16px;
+                    color: white;
+                    padding: 10px;
+                }
+            """)
+            self.alert_panel.setText(f"Obstacle detected!\nMin distance: {min_dist:.2f} m")
         else:
-            self.alert_panel.setStyleSheet("QLabel { background-color: green; font-size: 18px; }")
-            self.alert_panel.setText("Área libre")
+            self.alert_panel.setStyleSheet("""
+                QLabel {
+                    background-color: green;
+                    font-size: 16px;
+                    color: white;
+                    padding: 10px;
+                }
+            """)
+            self.alert_panel.setText(f"Free area\nMin distance: {min_dist:.2f} m")
+
+
 
 
 
 class ImageSubscriber(Node):
-    def __init__(self, label: QLabel, topic="/camera/image_raw"):
+    def __init__(self, label: QLabel, topic=TOPICS["camera_front"]):
         super().__init__('image_viewer')
         self.label = label
         self.bridge = CvBridge()
@@ -616,8 +656,8 @@ def handle_sigint(*args):
 def main():
     rclpy.init()
     node = RosUINode()
-    odom_node = OdometrySubscriber()
-    lidar_node = LidarNode("/panther/cx/scan", threshold=0.5)
+    odom_node = OdometrySubscriber(TOPICS["odom"])
+    lidar_node = LidarNode(TOPICS["lidar"], threshold=0.5)
     app = QApplication(sys.argv)
     win = MainWindow(node, odom_node, lidar_node)
     win.show()
@@ -673,10 +713,10 @@ def main():
 
     # Lista de tópicos de cámara
     cam_topics = [
-        "/camera/image_raw",
-        # "/camera2/image_raw",
-        # "/camera3/image_raw",
-        # "/camera4/image_raw"
+        TOPICS["camera_front"],
+        TOPICS["camera_rear"],
+        TOPICS["camera_left"],
+        TOPICS["camera_right"],
     ]
 
     # Lista de nodos de cámara
